@@ -38,6 +38,10 @@ if sys.stdout is None:
     sys.stdout = open(os.devnull, "w", encoding="utf-8")
 if sys.stderr is None:
     sys.stderr = open(os.devnull, "w", encoding="utf-8")
+# 한국어 Windows 콘솔(cp949)에 없는 문자를 출력해도 멈추지 않도록 함
+for _stream in (sys.stdout, sys.stderr):
+    if hasattr(_stream, "reconfigure"):
+        _stream.reconfigure(errors="replace")
 GAP_RECHECK_SEC = 8.0  # 이 길이 이상 단어가 없는 구간은 VAD 없이 다시 인식
 NEAR_BOOKMARK_MS = 1000  # 이 간격 안의 책갈피는 가장 빠른 것 하나만 남김
 
@@ -310,6 +314,24 @@ def drop_near_bookmarks(entries: list[tuple[int, str, str]]) -> list[tuple[int, 
     return kept
 
 
+def load_audio(path: str):
+    """.exe 는 번들된 LGPL FFmpeg 로 16kHz 모노 오디오를 추출. 소스 실행은 경로를 그대로 넘겨 PyAV 가 읽음.
+    PyAV 배포본에는 GPL 인 x264/x265 가 들어 있어 .exe 에 포함하지 않음."""
+    if not IS_FROZEN:
+        return path
+    import subprocess
+
+    import numpy as np
+
+    ffmpeg = os.path.join(sys._MEIPASS, "ffmpeg", "ffmpeg.exe")
+    cmd = [ffmpeg, "-nostdin", "-v", "error", "-i", path, "-vn", "-ac", "1", "-ar", "16000", "-f", "f32le", "-"]
+    result = subprocess.run(cmd, capture_output=True, creationflags=subprocess.CREATE_NO_WINDOW)
+    if result.returncode != 0 or not result.stdout:
+        detail = result.stderr.decode("utf-8", "replace").strip()[-300:]
+        raise RuntimeError(f"오디오를 읽을 수 없습니다: {detail}")
+    return np.frombuffer(result.stdout, dtype=np.float32)
+
+
 def set_hidden(path: str, hidden: bool) -> None:
     """Windows 숨김 속성 설정. 숨김 파일은 open(..., "w") 가 거부되므로 저장 전에 풀어야 함."""
     if os.name != "nt":
@@ -415,8 +437,9 @@ class Transcriber:
             hotwords=hotwords or None,
             condition_on_previous_text=False,
         )
+        audio = load_audio(path)
         # 1차: VAD 로 음성 구간만 빠르게 인식
-        segments, info = self.model().transcribe(path, vad_filter=True, **common)
+        segments, info = self.model().transcribe(audio, vad_filter=True, **common)
         duration = info.duration or 0
         words = self._collect(segments, duration, progress, stop)
 
@@ -426,7 +449,7 @@ class Transcriber:
             total = sum(e - s for s, e in gaps)
             self.log(f"  인식 안 된 구간 {len(gaps)}곳({fmt_time(total)})을 다시 검사합니다...")
             clip = [t for g in gaps for t in g]
-            segments, _ = self.model().transcribe(path, vad_filter=False, clip_timestamps=clip, **common)
+            segments, _ = self.model().transcribe(audio, vad_filter=False, clip_timestamps=clip, **common)
             extra = [
                 w for w in self._collect(segments, duration, progress, stop)
                 if any(s - 1.0 <= w.start and w.end <= e + 1.0 for s, e in gaps)
@@ -619,7 +642,7 @@ def run_gui() -> None:
     model_var = tk.StringVar(value=DEFAULT_MODEL)
     ttk.Combobox(of, textvariable=model_var, values=MODELS, width=15).pack(side="left", padx=(4, 12))
     ttk.Label(of, text="장치").pack(side="left")
-    dev_var = tk.StringVar(value="auto")
+    dev_var = tk.StringVar(value="cpu" if IS_FROZEN else "auto")  # .exe 는 CPU 전용
     ttk.Combobox(of, textvariable=dev_var, values=["auto", "cuda", "cpu"], width=6, state="readonly").pack(side="left", padx=(4, 12))
     ttk.Label(of, text="앞당김(초)").pack(side="left")
     pre_var = tk.DoubleVar(value=1.0)
