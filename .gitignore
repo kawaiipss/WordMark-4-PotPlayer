@@ -2,6 +2,10 @@ __pycache__/
 *.pyc
 .venv/
 venv/
+build/
+dist/
+release/
+*.spec
 
 # 로컬 테스트용 영상과 프로그램이 만드는 파일
 sample/
