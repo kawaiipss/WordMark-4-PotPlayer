@@ -11,8 +11,7 @@ BUILD_ONLY = {"altgraph", "pefile", "pip", "pyinstaller", "pyinstaller-hooks-con
 LICENSE_HINTS = ("license", "licence", "copying", "notice", "authors")
 
 HEADER = """WordMark-4-PotPlayer includes the third-party components listed below. Each
-component remains under its own license. The restrictions in this program's
-LICENSE file do not apply to them.
+component remains under its own license, not this program's MIT license.
 """
 
 FFMPEG = """FFmpeg {version}
