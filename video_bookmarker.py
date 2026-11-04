@@ -30,6 +30,14 @@ VIDEO_EXTS = {
 }
 LANGUAGES = {"ko": "한국어", "en": "English", "ja": "日本語"}
 MODELS = ["large-v3", "large-v3-turbo", "medium", "small", "base"]
+IS_FROZEN = getattr(sys, "frozen", False)  # .exe 로 실행 중인지 여부
+DEFAULT_MODEL = "small" if IS_FROZEN else "large-v3"  # .exe 는 CPU 전용이라 가벼운 모델이 기본
+
+# 콘솔 없는 .exe 에서는 stdout/stderr 가 None 이라 진행률 출력 라이브러리가 오류를 냄
+if sys.stdout is None:
+    sys.stdout = open(os.devnull, "w", encoding="utf-8")
+if sys.stderr is None:
+    sys.stderr = open(os.devnull, "w", encoding="utf-8")
 GAP_RECHECK_SEC = 8.0  # 이 길이 이상 단어가 없는 구간은 VAD 없이 다시 인식
 NEAR_BOOKMARK_MS = 1000  # 이 간격 안의 책갈피는 가장 빠른 것 하나만 남김
 
@@ -125,23 +133,40 @@ def collapse_repeats(stream: CharStream) -> CharStream:
 
 def romaji_keyword_regex(romaji: str) -> str:
     s = re.sub(r"(.)\1+", r"\1", romaji_canon_part(romaji))
-    # 조사 は(wa)가 pykakasi 에서 ha 로 읽히는 경우 대응
+    # 조사 は(wa)가 사전 읽기에서 ha 로 나오는 경우 대응
     return re.escape(s).replace("wa", "(?:wa|ha)")
 
 
-_kakasi = None
+# 사전 기본 읽기가 일상 회화의 읽기와 다른 단어
+READING_OVERRIDES = {"明日": "アシタ"}
+_tokenizer = None
 
 
-def kakasi():
-    global _kakasi
-    if _kakasi is None:
-        import pykakasi
-        _kakasi = pykakasi.kakasi()
-    return _kakasi
+def japanese_tokenizer():
+    global _tokenizer
+    if _tokenizer is None:
+        from sudachipy import Dictionary
+        _tokenizer = Dictionary(dict="core").tokenizer()
+    return _tokenizer
+
+
+def readings(text: str) -> list[tuple[int, str]]:
+    """일본어 문장을 형태소로 나눠 [(시작 문자 위치, 로마자)] 반환."""
+    import jaconv
+    from sudachipy import SplitMode
+
+    out = []
+    for m in japanese_tokenizer().tokenize(text, SplitMode.C):
+        if m.part_of_speech()[0] in ("空白", "補助記号"):  # 공백은 읽기가 "キゴウ"로 나옴
+            continue
+        kana = READING_OVERRIDES.get(m.surface(), m.reading_form() or m.surface())
+        kana = jaconv.kata2hira(kana).replace("ー", "").replace("っ", "")
+        out.append((m.begin(), jaconv.kana2alphabet(kana)))
+    return out
 
 
 def to_romaji(text: str) -> str:
-    return "".join(item["hepburn"] for item in kakasi().convert(text))
+    return "".join(romaji for _, romaji in readings(text))
 
 
 # ---------------------------------------------------------------------------
@@ -162,9 +187,9 @@ class Matcher:
 
     @staticmethod
     def romaji_stream(words: list[Word]) -> CharStream:
-        """단어들을 이어 붙여 pykakasi 로 변환(문맥 반영)한 뒤, 로마자를 원래 단어에 매핑."""
+        """단어들을 이어 붙여 형태소 분석(문맥 반영)한 뒤, 로마자를 원래 단어에 매핑."""
         st = CharStream()
-        chunk_size = 200  # 너무 긴 문자열을 한 번에 변환하지 않도록 단어 묶음 단위 처리
+        chunk_size = 200  # Sudachi 입력 길이 제한(약 49KB)을 넘지 않도록 단어 묶음 단위 처리
         for base in range(0, len(words), chunk_size):
             chunk = words[base:base + chunk_size]
             owner: list[int] = []
@@ -172,34 +197,9 @@ class Matcher:
             for i, w in enumerate(chunk):
                 raw += w.text
                 owner.extend([base + i] * len(w.text))
-            pos = 0
-            for item in kakasi().convert(raw):
-                orig = item["orig"]
-                if not orig:
-                    continue
-                own = owner[pos:pos + len(orig)] or [owner[-1]]
-                for romaji, idx in Matcher._split_item(orig, own, item["hepburn"]):
-                    st.add(romaji_canon_part(romaji), idx)
-                pos += len(orig)
+            for start, romaji in readings(raw):
+                st.add(romaji_canon_part(romaji), owner[start])
         return collapse_repeats(st)
-
-    @staticmethod
-    def _split_item(orig: str, own: list[int], hepburn: str) -> list[tuple[str, int]]:
-        """pykakasi 변환 단위가 여러 단어에 걸치면 단어별로 로마자를 나눔.
-        단어별로 따로 변환한 읽기가 전체 읽기와 같을 때만 나누고(가나 등),
-        다르면(東|京 처럼 한자가 쪼개진 경우) 첫 단어에 통째로 붙임."""
-        pieces: list[tuple[str, int]] = []
-        for c, i in zip(orig, own):
-            if pieces and pieces[-1][1] == i:
-                pieces[-1] = (pieces[-1][0] + c, i)
-            else:
-                pieces.append((c, i))
-        if len(pieces) == 1:
-            return [(hepburn, own[0])]
-        split = [(to_romaji(p), i) for p, i in pieces]
-        if romaji_canon_part("".join(r for r, _ in split)) == romaji_canon_part(hepburn):
-            return split
-        return [(hepburn, own[0])]
 
     # --- 검색 ---
     def find(self, words: list[Word]) -> list[Hit]:
@@ -616,7 +616,7 @@ def run_gui() -> None:
     of = ttk.Frame(frm)
     of.grid(row=6, column=0, columnspan=4, sticky="w", pady=6)
     ttk.Label(of, text="모델").pack(side="left")
-    model_var = tk.StringVar(value="large-v3")
+    model_var = tk.StringVar(value=DEFAULT_MODEL)
     ttk.Combobox(of, textvariable=model_var, values=MODELS, width=15).pack(side="left", padx=(4, 12))
     ttk.Label(of, text="장치").pack(side="left")
     dev_var = tk.StringVar(value="auto")

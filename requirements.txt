@@ -1,5 +1,7 @@
 ﻿faster-whisper>=1.1
-pykakasi>=2.3
+sudachipy>=0.7
+sudachidict-core
+jaconv>=0.4
 # NVIDIA GPU 가속 (없으면 자동으로 CPU 사용)
 nvidia-cublas-cu12
 nvidia-cudnn-cu12>=9,<10
